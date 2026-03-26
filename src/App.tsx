@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
 import './App.css'
-
 type SecCompanyEntry = {
   cik_str: number
   ticker: string
@@ -73,6 +72,23 @@ function buildFilingUrl(cik: string, accessionNumber: string, primaryDocument: s
   return `${SEC_ARCHIVES_URL}/${Number(cik)}/${accessionNumber.replaceAll('-', '')}/${primaryDocument}`
 }
 
+const QUARTERS = [1, 2, 3, 4] as const
+type Quarter = typeof QUARTERS[number]
+
+function quarterStartDate(year: number, quarter: Quarter): Date {
+  return new Date(year, (quarter - 1) * 3, 1)
+}
+
+function quarterEndDate(year: number, quarter: Quarter): Date {
+  // day 0 of the month after the quarter = last day of the quarter
+  return new Date(year, quarter * 3, 0)
+}
+
+function quarterLabel(q: Quarter) {
+  const labels: Record<Quarter, string> = { 1: 'Q1 (Jan–Mar)', 2: 'Q2 (Apr–Jun)', 3: 'Q3 (Jul–Sep)', 4: 'Q4 (Oct–Dec)' }
+  return labels[q]
+}
+
 function formatDate(date: string) {
   if (!date) {
     return 'Not available'
@@ -94,6 +110,11 @@ function App() {
   const [loadingCompanies, setLoadingCompanies] = useState(false)
   const [loadingFilings, setLoadingFilings] = useState(false)
   const [fetchAttempted, setFetchAttempted] = useState(false)
+  const [filterStartYear, setFilterStartYear] = useState<number | ''>('')
+  const [filterStartQuarter, setFilterStartQuarter] = useState<Quarter | ''>('')
+  const [filterEndYear, setFilterEndYear] = useState<number | ''>('')
+  const [filterEndQuarter, setFilterEndQuarter] = useState<Quarter | ''>('')
+  const [downloadProgress, setDownloadProgress] = useState<{ done: number; total: number; errors: number } | null>(null)
   const trimmedContactEmail = contactEmail.trim()
   const isContactEmailValid = trimmedContactEmail.length === 0 || EMAIL_PATTERN.test(trimmedContactEmail)
 
@@ -145,6 +166,59 @@ function App() {
       .slice(0, 8)
   }, [companies, query])
 
+  const CURRENT_YEAR = new Date().getFullYear()
+  const yearOptions = Array.from({ length: CURRENT_YEAR - 1993 + 1 }, (_, i) => CURRENT_YEAR - i)
+
+  const filteredFilings = useMemo(() => {
+    return filings.filter((filing) => {
+      const date = new Date(filing.filingDate)
+      if (isNaN(date.getTime())) return true
+      if (filterStartYear !== '' && filterStartQuarter !== '') {
+        if (date < quarterStartDate(filterStartYear, filterStartQuarter)) return false
+      }
+      if (filterEndYear !== '' && filterEndQuarter !== '') {
+        if (date > quarterEndDate(filterEndYear, filterEndQuarter)) return false
+      }
+      return true
+    })
+  }, [filings, filterStartYear, filterStartQuarter, filterEndYear, filterEndQuarter])
+
+  function clearDateFilter() {
+    setFilterStartYear('')
+    setFilterStartQuarter('')
+    setFilterEndYear('')
+    setFilterEndQuarter('')
+  }
+
+  async function downloadAll() {
+    if (filteredFilings.length === 0) return
+    setDownloadProgress({ done: 0, total: filteredFilings.length, errors: 0 })
+    let errors = 0
+    for (let i = 0; i < filteredFilings.length; i++) {
+      const filing = filteredFilings[i]
+      try {
+        // Fetch through the Vite proxy (same-origin) so the blob URL triggers a real download
+        const proxyUrl = filing.filingUrl.replace('https://www.sec.gov', '/api/sec')
+        const response = await fetch(proxyUrl)
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        const blob = await response.blob()
+        const blobUrl = URL.createObjectURL(blob)
+        const safeName = `${filing.form}_${filing.filingDate}_${filing.primaryDocument}`.replace(/[/\\:*?"<>|]/g, '_')
+        const a = document.createElement('a')
+        a.href = blobUrl
+        a.download = safeName
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        // Revoke after a tick so the browser has time to start the download
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 1000)
+      } catch {
+        errors++
+      }
+      setDownloadProgress({ done: i + 1, total: filteredFilings.length, errors })
+    }
+  }
+
   async function handleFetch() {
     const q = query.trim()
     if (!q) return
@@ -166,6 +240,7 @@ function App() {
     setSelectedCompany(company)
     setLoadingFilings(true)
     setFilings([])
+    setDownloadProgress(null)
     setFilingsStatus(`Loading recent filings for ${company.ticker}...`)
 
     try {
@@ -276,6 +351,57 @@ function App() {
           </div>
           <p className="status-text">{directoryStatus}</p>
 
+          <label className="field-label">Date range filter</label>
+          <div className="date-filter">
+            <div className="date-filter-group">
+              <span className="filter-label">From</span>
+              <select
+                className="filter-select"
+                value={filterStartYear}
+                onChange={(e) => setFilterStartYear(e.target.value ? Number(e.target.value) : '')}
+              >
+                <option value="">Year</option>
+                {yearOptions
+                  .filter((y) => filterEndYear === '' || y <= filterEndYear)
+                  .map((y) => <option key={y} value={y}>{y}</option>)}
+              </select>
+              <select
+                className="filter-select"
+                value={filterStartQuarter}
+                onChange={(e) => setFilterStartQuarter(e.target.value ? Number(e.target.value) as Quarter : '')}
+              >
+                <option value="">Quarter</option>
+                {QUARTERS.map((q) => <option key={q} value={q}>{quarterLabel(q)}</option>)}
+              </select>
+            </div>
+            <div className="date-filter-group">
+              <span className="filter-label">To</span>
+              <select
+                className="filter-select"
+                value={filterEndYear}
+                onChange={(e) => setFilterEndYear(e.target.value ? Number(e.target.value) : '')}
+              >
+                <option value="">Year</option>
+                {yearOptions
+                  .filter((y) => filterStartYear === '' || y >= filterStartYear)
+                  .map((y) => <option key={y} value={y}>{y}</option>)}
+              </select>
+              <select
+                className="filter-select"
+                value={filterEndQuarter}
+                onChange={(e) => setFilterEndQuarter(e.target.value ? Number(e.target.value) as Quarter : '')}
+              >
+                <option value="">Quarter</option>
+                {QUARTERS.map((q) => <option key={q} value={q}>{quarterLabel(q)}</option>)}
+              </select>
+            </div>
+            {(filterStartYear !== '' || filterEndYear !== '') ? (
+              <button type="button" className="filter-clear-btn" onClick={clearDateFilter}>
+                Clear
+              </button>
+            ) : null}
+          </div>
+
           {fetchAttempted && !loadingCompanies && companies.length === 0 ? (
             <div className="notice-panel">
               <strong>Why search is failing</strong>
@@ -325,13 +451,41 @@ function App() {
                   : 'Select a company'}
               </h2>
             </div>
+            {filteredFilings.length > 0 ? (
+              <div className="download-all-wrap">
+                {downloadProgress ? (
+                  <span className="download-progress">
+                    {downloadProgress.done < downloadProgress.total
+                      ? `Downloading ${downloadProgress.done} / ${downloadProgress.total}…`
+                      : downloadProgress.errors > 0
+                        ? `Done — ${downloadProgress.errors} file(s) failed`
+                        : `Downloaded ${downloadProgress.total} file(s)`}
+                  </span>
+                ) : null}
+                <button
+                  type="button"
+                  className="download-all-btn"
+                  onClick={() => void downloadAll()}
+                  disabled={(downloadProgress !== null && downloadProgress.done < downloadProgress.total)}
+                  title=""
+                >
+                  Download all ({filteredFilings.length})
+                </button>
+              </div>
+            ) : null}
           </div>
 
-          <p className="status-text">{loadingFilings ? 'Loading filings...' : filingsStatus}</p>
+          <p className="status-text">
+            {loadingFilings
+              ? 'Loading filings...'
+              : filteredFilings.length !== filings.length
+                ? `Showing ${filteredFilings.length} of ${filings.length} filings for ${selectedCompany?.name}.`
+                : filingsStatus}
+          </p>
 
           {filings.length > 0 ? (
             <div className="filing-grid">
-              {filings.map((filing) => (
+              {filteredFilings.length > 0 ? filteredFilings.map((filing) => (
                 <article key={`${filing.accessionNumber}-${filing.primaryDocument}`} className="filing-card">
                   <div className="filing-card-header">
                     <span className="filing-form">{filing.form}</span>
@@ -351,7 +505,11 @@ function App() {
                     </a>
                   </div>
                 </article>
-              ))}
+              )) : (
+                <div className="empty-state">
+                  No filings match the selected date range.
+                </div>
+              )}
             </div>
           ) : (
             <div className="empty-state">
