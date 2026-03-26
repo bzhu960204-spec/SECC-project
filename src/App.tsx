@@ -36,13 +36,16 @@ type FilingRecord = {
   filingUrl: string
 }
 
-const TICKER_LOOKUP_URL = 'https://www.sec.gov/files/company_tickers.json'
-const SEC_DATA_URL = 'https://data.sec.gov/submissions'
+// Requests go through Vite's dev proxy (vite.config.ts) which sets User-Agent server-side.
+const TICKER_LOOKUP_URL = '/api/sec/files/company_tickers.json'
+const SEC_DATA_URL = '/api/sec-data/submissions'
 const SEC_ARCHIVES_URL = 'https://www.sec.gov/Archives/edgar/data'
-const SEC_HEADERS = {
-  'Accept': 'application/json',
-  'User-Agent': 'SECC Project SEC Filings Downloader (client-side demo)',
-} satisfies HeadersInit
+const CONTACT_EMAIL_STORAGE_KEY = 'sec-downloader-contact-email'
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
+function buildSecHeaders(): HeadersInit {
+  return { 'Accept': 'application/json' }
+}
 
 function describeSecError(context: string, error: unknown) {
   const message = error instanceof Error ? error.message : 'Unknown error'
@@ -82,57 +85,48 @@ function formatDate(date: string) {
 
 function App() {
   const [companies, setCompanies] = useState<SecCompany[]>([])
-  const [query, setQuery] = useState('AAPL')
+  const [query, setQuery] = useState('')
+  const [contactEmail, setContactEmail] = useState(() => localStorage.getItem(CONTACT_EMAIL_STORAGE_KEY) ?? '')
   const [selectedCompany, setSelectedCompany] = useState<SecCompany | null>(null)
   const [filings, setFilings] = useState<FilingRecord[]>([])
-  const [directoryStatus, setDirectoryStatus] = useState('Loading SEC company directory...')
+  const [directoryStatus, setDirectoryStatus] = useState('Enter a ticker and click Fetch to search.')
   const [filingsStatus, setFilingsStatus] = useState('Search for a company to load 10-K and 10-Q filings.')
-  const [loadingCompanies, setLoadingCompanies] = useState(true)
+  const [loadingCompanies, setLoadingCompanies] = useState(false)
   const [loadingFilings, setLoadingFilings] = useState(false)
+  const [fetchAttempted, setFetchAttempted] = useState(false)
+  const trimmedContactEmail = contactEmail.trim()
+  const isContactEmailValid = trimmedContactEmail.length === 0 || EMAIL_PATTERN.test(trimmedContactEmail)
 
   useEffect(() => {
-    let ignore = false
+    localStorage.setItem(CONTACT_EMAIL_STORAGE_KEY, contactEmail)
+  }, [contactEmail])
 
-    async function loadCompanies() {
-      try {
-        const response = await fetch(TICKER_LOOKUP_URL, {
-          headers: SEC_HEADERS,
-        })
-
-        if (!response.ok) {
-          throw new Error(`SEC company directory request failed with ${response.status}`)
-        }
-
-        const data = (await response.json()) as Record<string, SecCompanyEntry>
-        const normalizedCompanies = Object.values(data)
-          .map(normalizeCompany)
-          .sort((left, right) => left.ticker.localeCompare(right.ticker))
-
-        if (ignore) {
-          return
-        }
-
-        setCompanies(normalizedCompanies)
-        setDirectoryStatus(`Loaded ${normalizedCompanies.length} SEC-listed companies.`)
-      } catch (error) {
-        if (ignore) {
-          return
-        }
-
-        setDirectoryStatus(describeSecError('Unable to load the SEC company directory.', error))
-      } finally {
-        if (!ignore) {
-          setLoadingCompanies(false)
-        }
+  async function fetchCompanies(): Promise<SecCompany[]> {
+    if (companies.length > 0) return companies
+    setLoadingCompanies(true)
+    setFetchAttempted(true)
+    setDirectoryStatus('Loading SEC company directory...')
+    try {
+      const response = await fetch(TICKER_LOOKUP_URL, {
+        headers: buildSecHeaders(),
+      })
+      if (!response.ok) {
+        throw new Error(`SEC company directory request failed with ${response.status}`)
       }
+      const data = (await response.json()) as Record<string, SecCompanyEntry>
+      const normalizedCompanies = Object.values(data)
+        .map(normalizeCompany)
+        .sort((left, right) => left.ticker.localeCompare(right.ticker))
+      setCompanies(normalizedCompanies)
+      setDirectoryStatus(`Loaded ${normalizedCompanies.length} SEC-listed companies.`)
+      return normalizedCompanies
+    } catch (error) {
+      setDirectoryStatus(describeSecError('Unable to load the SEC company directory.', error))
+      return []
+    } finally {
+      setLoadingCompanies(false)
     }
-
-    void loadCompanies()
-
-    return () => {
-      ignore = true
-    }
-  }, [])
+  }
 
   const searchResults = useMemo(() => {
     const trimmedQuery = query.trim().toLowerCase()
@@ -151,6 +145,23 @@ function App() {
       .slice(0, 8)
   }, [companies, query])
 
+  async function handleFetch() {
+    const q = query.trim()
+    if (!q) return
+    const pool = await fetchCompanies()
+    if (pool.length === 0) return
+    const lower = q.toLowerCase()
+    const results = pool
+      .filter((c) => c.ticker.toLowerCase().includes(lower) || c.name.toLowerCase().includes(lower))
+      .slice(0, 8)
+    if (results.length === 0) {
+      setFilingsStatus(`No companies found matching "${q}". Try a different ticker or name.`)
+      return
+    }
+    const exact = results.find((c) => c.ticker.toLowerCase() === lower)
+    void loadFilings(exact ?? results[0])
+  }
+
   async function loadFilings(company: SecCompany) {
     setSelectedCompany(company)
     setLoadingFilings(true)
@@ -159,7 +170,7 @@ function App() {
 
     try {
       const response = await fetch(`${SEC_DATA_URL}/CIK${company.cik}.json`, {
-        headers: SEC_HEADERS,
+        headers: buildSecHeaders(),
       })
 
       if (!response.ok) {
@@ -223,20 +234,49 @@ function App() {
 
       <section className="workspace-panel">
         <div className="search-panel">
+          <label className="field-label" htmlFor="contact-email">
+            Contact email (for SEC request identification)
+          </label>
+          <input
+            id="contact-email"
+            className={`search-input ${!isContactEmailValid ? 'invalid' : ''}`}
+            type="email"
+            placeholder="name@company.com"
+            value={contactEmail}
+            onChange={(event) => setContactEmail(event.target.value)}
+          />
+          <p className="field-help">
+            Set <code>SEC_CONTACT_EMAIL</code> in your environment before running <code>npm run dev</code> and the Vite proxy will forward it to SEC servers in the <code>User-Agent</code> header.
+          </p>
+          {!isContactEmailValid ? (
+            <p className="validation-error" role="alert">Enter a valid email address format.</p>
+          ) : null}
+
           <label className="field-label" htmlFor="company-search">
             Company search
           </label>
-          <input
-            id="company-search"
-            className="search-input"
-            type="search"
-            placeholder="Try AAPL, MSFT, NVIDIA, or a company name"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-          />
-          <p className="status-text">{loadingCompanies ? 'Loading...' : directoryStatus}</p>
+          <div className="search-input-row">
+            <input
+              id="company-search"
+              className="search-input"
+              type="search"
+              placeholder="Try AAPL, MSFT, NVIDIA, or a company name"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => { if (event.key === 'Enter') handleFetch() }}
+            />
+            <button
+              type="button"
+              className="fetch-btn"
+              onClick={handleFetch}
+              disabled={loadingFilings || !query.trim()}
+            >
+              Fetch
+            </button>
+          </div>
+          <p className="status-text">{directoryStatus}</p>
 
-          {!loadingCompanies && companies.length === 0 ? (
+          {fetchAttempted && !loadingCompanies && companies.length === 0 ? (
             <div className="notice-panel">
               <strong>Why search is failing</strong>
               <p>
@@ -245,8 +285,10 @@ function App() {
                 the browser in the current network environment.
               </p>
               <p>
-                The usual fix is to route SEC requests through a small backend proxy that adds an
-                approved User-Agent and runs from a network the SEC accepts.
+                Browser apps cannot reliably control or override the real network User-Agent header,
+                so this UI can only include contact info while constructing request headers in
+                JavaScript. For dependable SEC compliance and access, route requests through a
+                backend proxy that sets headers server-side.
               </p>
             </div>
           ) : null}
