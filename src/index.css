@@ -1,0 +1,82 @@
+:root {
+  --text: #39535d;
+  --text-h: #11252d;
+  --bg: #f7f0e5;
+  --border: rgba(17, 37, 45, 0.12);
+  --accent: #1f6b7a;
+  --shadow: rgba(34, 44, 54, 0.08) 0 18px 44px;
+  --sans: 'Segoe UI', 'Aptos', 'Trebuchet MS', sans-serif;
+  --heading: Georgia, 'Times New Roman', serif;
+
+  font: 17px/1.5 var(--sans);
+  letter-spacing: 0.01em;
+  color: var(--text);
+  background:
+    radial-gradient(circle at top left, rgba(207, 161, 99, 0.22), transparent 24%),
+    linear-gradient(180deg, #fbf6ee, #f2e6d3);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+#root {
+  width: min(1240px, 100%);
+  margin: 0 auto;
+  min-height: 100vh;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--heading);
+  font-weight: 700;
+  color: var(--text-h);
+}
+
+h1 {
+  font-size: clamp(2.8rem, 5vw, 4.8rem);
+  line-height: 0.95;
+}
+
+h2 {
+  font-size: clamp(1.8rem, 3vw, 2.6rem);
+}
+
+h3,
+p {
+  margin: 0;
+}
+
+a,
+button,
+input {
+  transition:
+    transform 160ms ease,
+    box-shadow 160ms ease,
+    border-color 160ms ease,
+    background-color 160ms ease;
+}
+
+a:hover,
+button:hover {
+  transform: translateY(-1px);
+}
+
+button {
+  font: inherit;
+  border: none;
+}
