@@ -72,6 +72,29 @@ function buildFilingUrl(cik: string, accessionNumber: string, primaryDocument: s
   return `${SEC_ARCHIVES_URL}/${Number(cik)}/${accessionNumber.replaceAll('-', '')}/${primaryDocument}`
 }
 
+async function downloadAsPdf(htmlText: string, filename: string): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { default: html2pdf } = (await import('html2pdf.js')) as any
+  const container = document.createElement('div')
+  container.style.cssText = 'position:absolute;left:-9999px;top:0;width:210mm'
+  container.innerHTML = htmlText
+  document.body.appendChild(container)
+  try {
+    await html2pdf()
+      .set({
+        margin: 0.5,
+        filename,
+        image: { type: 'jpeg', quality: 0.95 },
+        html2canvas: { scale: 1, useCORS: true, logging: false },
+        jsPDF: { unit: 'in', format: 'a4', orientation: 'portrait' },
+      })
+      .from(container)
+      .save()
+  } finally {
+    document.body.removeChild(container)
+  }
+}
+
 const QUARTERS = [1, 2, 3, 4] as const
 type Quarter = typeof QUARTERS[number]
 
@@ -112,9 +135,12 @@ function App() {
   const [fetchAttempted, setFetchAttempted] = useState(false)
   const [filterStartYear, setFilterStartYear] = useState<number | ''>('')
   const [filterStartQuarter, setFilterStartQuarter] = useState<Quarter | ''>('')
-  const [filterEndYear, setFilterEndYear] = useState<number | ''>('')
+  const [filterEndYear, setFilterEndYear] = useState<number | '' | 'current'>('')
   const [filterEndQuarter, setFilterEndQuarter] = useState<Quarter | ''>('')
   const [downloadProgress, setDownloadProgress] = useState<{ done: number; total: number; errors: number } | null>(null)
+  const [downloadStep, setDownloadStep] = useState<string | null>(null)
+  const [fileType, setFileType] = useState<'htm' | 'pdf'>('htm')
+  const [convertingFilingKey, setConvertingFilingKey] = useState<string | null>(null)
   const trimmedContactEmail = contactEmail.trim()
   const isContactEmailValid = trimmedContactEmail.length === 0 || EMAIL_PATTERN.test(trimmedContactEmail)
 
@@ -176,7 +202,9 @@ function App() {
       if (filterStartYear !== '' && filterStartQuarter !== '') {
         if (date < quarterStartDate(filterStartYear, filterStartQuarter)) return false
       }
-      if (filterEndYear !== '' && filterEndQuarter !== '') {
+      if (filterEndYear === 'current') {
+        if (date > new Date()) return false
+      } else if (filterEndYear !== '' && filterEndQuarter !== '') {
         if (date > quarterEndDate(filterEndYear, filterEndQuarter)) return false
       }
       return true
@@ -193,29 +221,65 @@ function App() {
   async function downloadAll() {
     if (filteredFilings.length === 0) return
     setDownloadProgress({ done: 0, total: filteredFilings.length, errors: 0 })
+    setDownloadStep(null)
     let errors = 0
     for (let i = 0; i < filteredFilings.length; i++) {
       const filing = filteredFilings[i]
+      const label = `${filing.form} — ${formatDate(filing.filingDate)}`
       try {
-        // Fetch through the Vite proxy (same-origin) so the blob URL triggers a real download
+        setDownloadStep(`Fetching: ${label}`)
         const proxyUrl = filing.filingUrl.replace('https://www.sec.gov', '/api/sec')
         const response = await fetch(proxyUrl)
         if (!response.ok) throw new Error(`HTTP ${response.status}`)
-        const blob = await response.blob()
-        const blobUrl = URL.createObjectURL(blob)
-        const safeName = `${filing.form}_${filing.filingDate}_${filing.primaryDocument}`.replace(/[/\\:*?"<>|]/g, '_')
-        const a = document.createElement('a')
-        a.href = blobUrl
-        a.download = safeName
-        document.body.appendChild(a)
-        a.click()
-        document.body.removeChild(a)
-        // Revoke after a tick so the browser has time to start the download
-        setTimeout(() => URL.revokeObjectURL(blobUrl), 1000)
+        if (fileType === 'pdf') {
+          setDownloadStep(`Converting to PDF: ${label}`)
+          const htmlText = await response.text()
+          const safeName = `${filing.form}_${filing.filingDate}_${filing.primaryDocument.replace(/\.htm$/i, '.pdf')}`.replace(/[/\\:*?"<>|]/g, '_')
+          await downloadAsPdf(htmlText, safeName)
+        } else {
+          setDownloadStep(`Saving: ${label}`)
+          const blob = await response.blob()
+          const blobUrl = URL.createObjectURL(blob)
+          const safeName = `${filing.form}_${filing.filingDate}_${filing.primaryDocument}`.replace(/[/\\:*?"<>|]/g, '_')
+          const a = document.createElement('a')
+          a.href = blobUrl
+          a.download = safeName
+          document.body.appendChild(a)
+          a.click()
+          document.body.removeChild(a)
+          setTimeout(() => URL.revokeObjectURL(blobUrl), 1000)
+        }
       } catch {
         errors++
+        setDownloadStep(`Failed: ${label}`)
       }
       setDownloadProgress({ done: i + 1, total: filteredFilings.length, errors })
+    }
+    setDownloadStep(null)
+  }
+
+  async function downloadFilingAsPdf(filing: FilingRecord) {
+    const key = `${filing.accessionNumber}-${filing.primaryDocument}`
+    const label = `${filing.form} — ${formatDate(filing.filingDate)}`
+    setConvertingFilingKey(key)
+    setDownloadProgress({ done: 0, total: 1, errors: 0 })
+    setDownloadStep(`Fetching: ${label}`)
+    try {
+      const proxyUrl = filing.filingUrl.replace('https://www.sec.gov', '/api/sec')
+      const response = await fetch(proxyUrl)
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      setDownloadStep(`Converting to PDF: ${label}`)
+      const htmlText = await response.text()
+      const safeName = `${filing.form}_${filing.filingDate}_${filing.primaryDocument.replace(/\.htm$/i, '.pdf')}`.replace(/[/\\:*?"<>|]/g, '_')
+      await downloadAsPdf(htmlText, safeName)
+      setDownloadProgress({ done: 1, total: 1, errors: 0 })
+      setDownloadStep(null)
+    } catch (e) {
+      console.error('PDF conversion failed:', e)
+      setDownloadProgress({ done: 1, total: 1, errors: 1 })
+      setDownloadStep(`Failed: ${label}`)
+    } finally {
+      setConvertingFilingKey(null)
     }
   }
 
@@ -362,7 +426,7 @@ function App() {
               >
                 <option value="">Year</option>
                 {yearOptions
-                  .filter((y) => filterEndYear === '' || y <= filterEndYear)
+                  .filter((y) => filterEndYear === '' || filterEndYear === 'current' || y <= filterEndYear)
                   .map((y) => <option key={y} value={y}>{y}</option>)}
               </select>
               <select
@@ -379,9 +443,18 @@ function App() {
               <select
                 className="filter-select"
                 value={filterEndYear}
-                onChange={(e) => setFilterEndYear(e.target.value ? Number(e.target.value) : '')}
+                onChange={(e) => {
+                  const v = e.target.value
+                  if (v === 'current') {
+                    setFilterEndYear('current')
+                    setFilterEndQuarter('')
+                  } else {
+                    setFilterEndYear(v ? Number(v) : '')
+                  }
+                }}
               >
                 <option value="">Year</option>
+                <option value="current">Current</option>
                 {yearOptions
                   .filter((y) => filterStartYear === '' || y >= filterStartYear)
                   .map((y) => <option key={y} value={y}>{y}</option>)}
@@ -389,13 +462,14 @@ function App() {
               <select
                 className="filter-select"
                 value={filterEndQuarter}
+                disabled={filterEndYear === 'current'}
                 onChange={(e) => setFilterEndQuarter(e.target.value ? Number(e.target.value) as Quarter : '')}
               >
                 <option value="">Quarter</option>
                 {QUARTERS.map((q) => <option key={q} value={q}>{quarterLabel(q)}</option>)}
               </select>
             </div>
-            {(filterStartYear !== '' || filterEndYear !== '') ? (
+            {(filterStartYear !== '' || filterEndYear !== '' ) ? (
               <button type="button" className="filter-clear-btn" onClick={clearDateFilter}>
                 Clear
               </button>
@@ -453,15 +527,18 @@ function App() {
             </div>
             {filteredFilings.length > 0 ? (
               <div className="download-all-wrap">
-                {downloadProgress ? (
-                  <span className="download-progress">
-                    {downloadProgress.done < downloadProgress.total
-                      ? `Downloading ${downloadProgress.done} / ${downloadProgress.total}…`
-                      : downloadProgress.errors > 0
-                        ? `Done — ${downloadProgress.errors} file(s) failed`
-                        : `Downloaded ${downloadProgress.total} file(s)`}
-                  </span>
-                ) : null}
+                <div className="file-type-toggle">
+                  <button
+                    type="button"
+                    className={`type-btn ${fileType === 'htm' ? 'active' : ''}`}
+                    onClick={() => { setFileType('htm'); setDownloadProgress(null); setDownloadStep(null) }}
+                  >HTM</button>
+                  <button
+                    type="button"
+                    className={`type-btn ${fileType === 'pdf' ? 'active' : ''}`}
+                    onClick={() => { setFileType('pdf'); setDownloadProgress(null); setDownloadStep(null) }}
+                  >PDF</button>
+                </div>
                 <button
                   type="button"
                   className="download-all-btn"
@@ -474,6 +551,38 @@ function App() {
               </div>
             ) : null}
           </div>
+
+          {downloadProgress ? (
+            <div className="progress-panel">
+              <div className="progress-panel-header">
+                <span className="progress-panel-title">
+                  {downloadProgress.done < downloadProgress.total
+                    ? `Downloading ${downloadProgress.done} of ${downloadProgress.total}…`
+                    : downloadProgress.errors > 0
+                      ? `Done — ${downloadProgress.errors} file(s) failed`
+                      : `\u2713 All ${downloadProgress.total} file(s) downloaded`}
+                </span>
+                {downloadProgress.done >= downloadProgress.total ? (
+                  <button
+                    type="button"
+                    className="progress-dismiss-btn"
+                    onClick={() => { setDownloadProgress(null); setDownloadStep(null) }}
+                  >
+                    Dismiss
+                  </button>
+                ) : null}
+              </div>
+              <div className="progress-track">
+                <div
+                  className="progress-fill"
+                  style={{ width: `${Math.round((downloadProgress.done / downloadProgress.total) * 100)}%` }}
+                />
+              </div>
+              {downloadStep ? (
+                <p className="progress-step">{downloadStep}</p>
+              ) : null}
+            </div>
+          ) : null}
 
           <p className="status-text">
             {loadingFilings
@@ -500,9 +609,20 @@ function App() {
                     <a href={filing.filingUrl} target="_blank" rel="noreferrer" className="primary-action">
                       Open filing
                     </a>
-                    <a href={filing.filingUrl} download className="secondary-action">
-                      Download link
-                    </a>
+                    {fileType === 'pdf' ? (
+                      <button
+                        type="button"
+                        className="secondary-action"
+                        onClick={() => void downloadFilingAsPdf(filing)}
+                        disabled={convertingFilingKey === `${filing.accessionNumber}-${filing.primaryDocument}`}
+                      >
+                        {convertingFilingKey === `${filing.accessionNumber}-${filing.primaryDocument}` ? 'Converting…' : 'Download PDF'}
+                      </button>
+                    ) : (
+                      <a href={filing.filingUrl} download className="secondary-action">
+                        Download HTM
+                      </a>
+                    )}
                   </div>
                 </article>
               )) : (
